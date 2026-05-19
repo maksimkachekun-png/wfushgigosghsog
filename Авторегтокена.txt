@@ -8,7 +8,7 @@ from pymax import SocketMaxClient
 from pymax.models import UserAgentPayload
 
 # --- НАСТРОЙКИ ---
-API_TOKEN = "ТВОЙ_ТОКЕН_ОТ_BOTFATHER"
+API_TOKEN = "8787042752:AAGGFTxbo0q1j1i9CD7PPTOE5FDKNDXOHbY"
 WORK_DIR = "sessions"  # Папка для хранения сессий
 
 bot = Bot(token=API_TOKEN)
