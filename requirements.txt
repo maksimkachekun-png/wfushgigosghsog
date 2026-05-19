@@ -1,2 +1,5 @@
-maxapi-python
 aiogram
+maxapi-python
+requests
+loguru
+websockets
