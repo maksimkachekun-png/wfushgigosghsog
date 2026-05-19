@@ -6,6 +6,8 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from pymax import SocketMaxClient
 from pymax.models import UserAgentPayload
+from pymax.client import SocketMaxClient
+from pymax.models import UserAgentPayload
 
 # --- НАСТРОЙКИ ---
 API_TOKEN = "8787042752:AAGGFTxbo0q1j1i9CD7PPTOE5FDKNDXOHbY"
