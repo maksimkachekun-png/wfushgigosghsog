@@ -2,9 +2,10 @@ import asyncio
 import re
 import sqlite3
 import os
-import importlib
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from pymax import SocketMaxClient
+from pymax.models import UserAgentPayload
 
 # --- НАСТРОЙКИ ---
 API_TOKEN = "8787042752:AAGGFTxbo0q1j1i9CD7PPTOE5FDKNDXOHbY"
@@ -13,46 +14,10 @@ WORK_DIR = "sessions"
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- АВТООПРЕДЕЛЕНИЕ КЛАССОВ PYMAX ---
-# Вместо того чтобы гадать на структуре, найдем их в корне пакета
-import pymax
-# Находим все публичные имена в pymax
-_names = [x for x in dir(pymax) if not x.startswith('_')]
-
-def _find_class(part_name):
-    """Ищет класс, содержащий part_name в названии"""
-    for name in _names:
-        if part_name.lower() in name.lower():
-            return getattr(pymax, name)
-    raise ImportError(f"Не могу найти класс содержащий '{part_name}' в pymax. Доступные: {_names}")
-
-try:
-    # Пробуем угадать имена классов
-    ClientClass = _find_class('socket') or _find_class('client')
-except:
-    # Если угадать не получилось, пробуем частые варианты
-    for cls_name in ['SocketMaxClient', 'Client', 'MaxClient']:
-        if hasattr(pymax, cls_name):
-            ClientClass = getattr(pymax, cls_name)
-            break
-    else:
-        raise ImportError(f"Не нашел класс клиента в pymax. Доступные объекты: {_names}")
-
-try:
-    UAClass = _find_class('user') or _find_class('agent')
-except:
-    for cls_name in ['UserAgentPayload', 'UserAgent']:
-        if hasattr(pymax, cls_name):
-            UAClass = getattr(pymax, cls_name)
-            break
-    else:
-        UAClass = None  # Необязательный класс
-
-# Хранилище активных сессий
 sessions: dict[int, "SessionData"] = {}
 
 class SessionData:
-    def __init__(self, phone: str, client):
+    def __init__(self, phone: str, client: SocketMaxClient):
         self.phone = phone
         self.client = client
         self.temp_token = None
@@ -60,23 +25,17 @@ class SessionData:
         self.last_code = None
 
 def get_work_dir(phone: str) -> str:
-    """Создаёт и возвращает путь к папке сессии для номера"""
     path = os.path.join(WORK_DIR, phone.strip("+"))
     os.makedirs(path, exist_ok=True)
     return path
 
-async def create_client(phone: str):
-    """Создаёт и подключает клиент PyMax"""
-    if UAClass:
-        ua = UAClass(device_type="DESKTOP", app_version="25.12.13")
-        client = ClientClass(phone=phone, work_dir=get_work_dir(phone), headers=ua)
-    else:
-        client = ClientClass(phone=phone, work_dir=get_work_dir(phone))
+async def create_client(phone: str) -> SocketMaxClient:
+    ua = UserAgentPayload(device_type="DESKTOP", app_version="25.12.13")
+    client = SocketMaxClient(phone=phone, work_dir=get_work_dir(phone), headers=ua)
     await client.connect()
     return client
 
 def read_token_from_db(phone: str) -> str | None:
-    """Читает токен из session.db"""
     db_path = os.path.join(get_work_dir(phone), "session.db")
     if not os.path.exists(db_path):
         return None
@@ -87,7 +46,7 @@ def read_token_from_db(phone: str) -> str | None:
         row = cursor.fetchone()
         conn.close()
         return row[0] if row else None
-    except Exception:
+    except:
         return None
 
 # --- КОМАНДЫ ---
@@ -96,9 +55,8 @@ def read_token_from_db(phone: str) -> str | None:
 async def cmd_start(message: types.Message):
     await message.answer(
         "🤖 Бот для получения токена Max\n\n"
-        "Команды:\n"
         "/login — начать авторизацию\n"
-        "/cancel — отменить текущую сессию"
+        "/cancel — отменить сессию"
     )
 
 @dp.message(Command("cancel"))
@@ -118,10 +76,10 @@ async def cmd_cancel(message: types.Message):
 async def cmd_login(message: types.Message):
     user_id = message.from_user.id
     if user_id in sessions and sessions[user_id] is not None:
-        await message.answer("У тебя уже есть активная сессия. Сначала /cancel")
+        await message.answer("Уже есть активная сессия. Сначала /cancel")
         return
     sessions[user_id] = None
-    await message.answer("📱 Отправь номер телефона в формате +79XXXXXXXXX")
+    await message.answer("📱 Отправь номер в формате +79XXXXXXXXX")
 
 # --- ОБРАБОТКА СООБЩЕНИЙ ---
 
@@ -130,148 +88,85 @@ async def handle_message(message: types.Message):
     user_id = message.from_user.id
     text = message.text.strip()
 
-    # --- ЭТАП 1: Ожидание облачного пароля ---
+    # --- Облачный пароль ---
     if user_id in sessions:
-        session = sessions[user_id]
-        if isinstance(session, SessionData) and session.awaiting_password:
-            password = text
-            await message.answer("🔐 Пытаюсь войти с облачным паролем...")
+        s = sessions[user_id]
+        if isinstance(s, SessionData) and s.awaiting_password:
+            await message.answer("🔐 Вхожу с облачным паролем...")
             try:
-                # Пробуем разные названия методов
-                for method_name in ['login_with_cloud_password', 'login_with_code_password']:
-                    if hasattr(session.client, method_name):
-                        await getattr(session.client, method_name)(
-                            temp_token=session.temp_token,
-                            password=password
-                        )
-                        break
+                # Пробуем оба варианта метода
+                if hasattr(s.client, 'login_with_cloud_password'):
+                    await s.client.login_with_cloud_password(s.temp_token, text)
+                elif hasattr(s.client, 'login_with_code_password'):
+                    await s.client.login_with_code_password(s.temp_token, s.last_code, text)
+                else:
+                    await s.client.login_with_code(s.temp_token, s.last_code, text)
             except Exception as e:
                 await message.answer(f"❌ Ошибка: {e}")
                 return
-            await finish_login(message, session)
+            await finish_login(message, s)
             return
 
-    # --- ЭТАП 2: Ввод номера телефона ---
+    # --- Номер телефона ---
     if re.fullmatch(r"\+7\d{10}", text):
         if user_id in sessions and sessions[user_id] is None:
             phone = text
-            await message.answer(f"⏳ Подключаюсь и запрашиваю код для {phone}...")
+            await message.answer(f"⏳ Запрашиваю код для {phone}...")
             try:
                 client = await create_client(phone)
-                # Ищем метод запроса кода
-                for method_name in ['request_code', 'send_code']:
-                    if hasattr(client, method_name):
-                        temp_token = await getattr(client, method_name)(phone)
-                        break
-                else:
-                    raise AttributeError("Нет метода request_code или send_code")
-                
+                temp_token = await client.request_code(phone)
                 session = SessionData(phone=phone, client=client)
                 session.temp_token = temp_token
                 sessions[user_id] = session
-                
                 await message.answer(
                     f"✅ Код отправлен на {phone}\n\n"
-                    "✏️ Пришли мне код из СМС (6 цифр)\n\n"
-                    "⚠️ Если на аккаунте есть облачный пароль, "
-                    "бот сам запросит его после ввода кода."
+                    "✏️ Пришли мне код (6 цифр)"
                 )
             except Exception as e:
-                await message.answer(f"❌ Ошибка при запросе кода: {e}")
+                await message.answer(f"❌ Ошибка: {e}")
                 sessions.pop(user_id, None)
         else:
-            await message.answer("Сначала введи /login")
+            await message.answer("Сначала /login")
         return
 
-    # --- ЭТАП 3: Ввод кода из СМС ---
+    # --- Код из СМС ---
     code_match = re.fullmatch(r"(\d{6})", text)
     if code_match and user_id in sessions:
-        session = sessions[user_id]
-        if not isinstance(session, SessionData):
-            await message.answer("Сначала введи /login")
+        s = sessions[user_id]
+        if not isinstance(s, SessionData):
+            await message.answer("Сначала /login")
             return
-
         code = code_match.group(1)
-        session.last_code = code
-        
-        await message.answer("🔑 Выполняю вход...")
-        
+        s.last_code = code
+        await message.answer("🔑 Вхожу...")
         try:
-            # Ищем метод для входа с кодом
-            resp = None
-            for method_name in ['login_with_code', 'confirm_code']:
-                if hasattr(session.client, method_name):
-                    resp = await getattr(session.client, method_name)(
-                        session.temp_token, code
-                    )
-                    break
-            
-            # Проверяем ответ на требование пароля
-            if isinstance(resp, dict):
-                if resp.get("status") == "cloud_password_required" or \
-                   resp.get("error") == "cloud_password_required":
-                    session.awaiting_password = True
-                    await message.answer(
-                        "🔐 Этот аккаунт защищён облачным паролем!\n"
-                        "Отправь мне облачный пароль:"
-                    )
-                    return
-            
-            await finish_login(message, session)
-            
+            resp = await s.client.login_with_code(s.temp_token, code)
+            if isinstance(resp, dict) and "password" in str(resp).lower():
+                s.awaiting_password = True
+                await message.answer("🔐 Нужен облачный пароль. Отправь:")
+                return
+            await finish_login(message, s)
         except Exception as e:
-            error_msg = str(e).lower()
-            if "password" in error_msg or "cloud" in error_msg:
-                session.awaiting_password = True
-                await message.answer(
-                    "🔐 Этот аккаунт защищён облачным паролем!\n"
-                    "Отправь мне облачный пароль:"
-                )
+            if "password" in str(e).lower():
+                s.awaiting_password = True
+                await message.answer("🔐 Нужен облачный пароль. Отправь:")
             else:
-                await message.answer(f"❌ Ошибка авторизации: {e}")
+                await message.answer(f"❌ Ошибка: {e}")
         return
 
-    await message.answer(
-        "🤔 Не понял. Ожидаю:\n"
-        "• Номер (+79XXXXXXXXX) — после /login\n"
-        "• Код из СМС (6 цифр)\n"
-        "• Или облачный пароль (если был запрошен)"
-    )
+    await message.answer("Ожидаю номер или код.")
 
-# --- ЗАВЕРШЕНИЕ ВХОДА ---
-
-async def finish_login(message: types.Message, session: SessionData):
-    user_id = message.from_user.id
-    phone = session.phone
-    
-    token = read_token_from_db(phone)
-    if not token:
-        try:
-            token = session.client.token
-        except:
-            token = None
-    
+async def finish_login(message: types.Message, s: SessionData):
+    token = read_token_from_db(s.phone) or getattr(s.client, 'token', None)
     if token:
-        await message.answer(
-            "✅ <b>Авторизация успешна!</b>\n\n"
-            f"<code>{token}</code>\n\n"
-            "⚠️ Храни токен в безопасности. Не передавай третьим лицам.",
-            parse_mode="HTML"
-        )
+        await message.answer(f"✅ Успешно!\n\n<code>{token}</code>", parse_mode="HTML")
     else:
-        await message.answer(
-            "⚠️ Вход выполнен, но токен получить не удалось.\n"
-            f"Проверь файл вручную: sessions/{phone.strip('+')}/session.db"
-        )
-    
+        await message.answer(f"⚠️ Токен не найден. Проверь папку sessions/{s.phone.strip('+')}")
     try:
-        await session.client.disconnect()
+        await s.client.disconnect()
     except:
         pass
-    
-    sessions.pop(user_id, None)
-
-# --- ЗАПУСК ---
+    sessions.pop(message.from_user.id, None)
 
 async def main():
     os.makedirs(WORK_DIR, exist_ok=True)
